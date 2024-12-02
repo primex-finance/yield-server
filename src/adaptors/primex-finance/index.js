@@ -14,36 +14,8 @@ const {
 } = require('./utils');
 
 const formatPool = async (bucket, config, EPMXPrice) => {
-  const {
-    bucketAddress,
-    asset,
-    supportedAssets,
-    supply,
-    demand,
-    bar,
-    lar,
-    estimatedBar,
-    estimatedLar,
-    miningParams,
-    name,
-  } = bucket;
-  const { chain, activityRewardDistributor, EPMX, USDCE, apyRewardBySymbol } =
-    config;
-
-  const [rewardPerTokenLender, rewardPerTokenTrader] = (
-    await Promise.all(
-      Object.values(ROLES).map((r) => {
-        return sdk.api.abi.call({
-          abi: abi.activityRewardDistributorBuckets,
-          target: activityRewardDistributor,
-          chain: chain.toLowerCase(),
-          params: [bucketAddress, r],
-        });
-      })
-    )
-  ).map((v) => {
-    return v.output.isFinished ? 0 : v.output.rewardPerToken;
-  });
+  const { bucketAddress, asset, supportedAssets, supply, demand, bar, lar, estimatedBar, estimatedLar, miningParams, name } = bucket;
+  const { chain, EPMX, USDCE, apyRewardBySymbol } = config
 
   const symbol = addressEq(asset.tokenAddress, USDCE) ? 'USDC.E' : asset.symbol;
   const underlyingTokens = [asset.tokenAddress];
@@ -136,11 +108,8 @@ const getPools = async (config) => {
   return await Promise.all(
     buckets
       .filter(({ miningParams }) => {
-        const isMiningFailed =
-          !miningParams.isBucketLaunched &&
-          miningParams.deadlineTimestamp * 1000 <= Date.now();
-
-        return !isMiningFailed;
+        const isMiningFailed = !miningParams.isBucketLaunched && miningParams.deadlineTimestamp * 1000 <= Date.now()
+        return !isMiningFailed
       })
       .map((b) => formatPool(b, config, EPMXPrice))
   );
