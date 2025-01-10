@@ -1,6 +1,8 @@
 const sdk = require('@defillama/sdk');
 const superagent = require('superagent');
 const { abi } = require('./abi');
+const { ethers } = require('ethers');
+const utils = require('../utils');
 const {
   CHAIN_IDS,
   DEAD_ADDRESS,
@@ -8,12 +10,11 @@ const {
   SECONDS_PER_YEAR,
   APY_REWARD_BONUS,
   config,
-  configV2,
   addressEq,
   getPoolUrl,
 } = require('./utils');
 
-const formatPool = async (bucket, config, EPMXPrice) => {
+const formatPool = async (bucket, config) => {
   const {
     bucketAddress,
     asset,
@@ -27,28 +28,32 @@ const formatPool = async (bucket, config, EPMXPrice) => {
     miningParams,
     name,
   } = bucket;
+
   const { chain, EPMX, USDCE, apyRewardBySymbol } = config;
 
-  const symbol = addressEq(asset.tokenAddress, USDCE) ? 'USDC.E' : asset.symbol;
-  const underlyingTokens = [asset.tokenAddress];
+  const symbol = addressEq(asset?.tokenAddress, USDCE)
+    ? 'USDC.E'
+    : asset?.symbol;
+  const underlyingTokens = [asset?.tokenAddress];
 
   const priceKeys = underlyingTokens
     .map((t) => `${chain.toLowerCase()}:${t}`)
     .join(',');
+
   const prices = (
     await superagent.get(`https://coins.llama.fi/prices/current/${priceKeys}`)
   ).body.coins;
 
-  const assetPrice = prices[`${chain.toLowerCase()}:${asset.tokenAddress}`];
+  const assetPrice = prices[`${chain.toLowerCase()}:${asset?.tokenAddress}`];
   const totalSupplyUsd =
-    (supply / 10 ** assetPrice.decimals) * assetPrice.price;
+    (supply / 10 ** assetPrice?.decimals) * assetPrice?.price;
   const totalBorrowUsd =
-    (demand / 10 ** assetPrice.decimals) * assetPrice.price;
+    (demand / 10 ** assetPrice?.decimals) * assetPrice?.price;
   const tvlUsd = totalSupplyUsd - totalBorrowUsd;
 
   const isMiningPhase =
-    !miningParams.isBucketLaunched &&
-    miningParams.deadlineTimestamp * 1000 > Date.now();
+    !miningParams?.isBucketLaunched &&
+    miningParams?.deadlineTimestamp * 1000 > Date.now();
 
   const apyBaseCalculated =
     (Math.pow(1 + lar / 10 ** 27 / SECONDS_PER_YEAR, SECONDS_PER_YEAR) - 1) *
@@ -70,7 +75,6 @@ const formatPool = async (bucket, config, EPMXPrice) => {
     tvlUsd,
     apyBase,
     apyReward,
-    rewardTokens: [EPMX],
     underlyingTokens,
     url: getPoolUrl(bucketAddress, chain),
     apyBaseBorrow,
@@ -86,63 +90,81 @@ const getPools = async (config) => {
     lensAddress,
     bucketsFactory,
     positionManager,
-    EPMX,
-    EPMXPriceFeed,
-    EPMXPriceFeedDecimals,
   } = config;
 
-  const buckets = (
-    await sdk.api.abi.call({
-      abi: abi.getAllBucketsFactory,
-      target: lensAddress,
-      chain: chain.toLowerCase(),
-      params: [bucketsFactory, DEAD_ADDRESS, positionManager, false],
-    })
-  ).output;
+  if (chain === 'Ethereum') {
+    sdk.api.config.setProvider(
+      'ethereum',
+      new ethers.providers.JsonRpcProvider(
+        "https://lb.drpc.org/ogrpc?network=ethereum&dkey=AhjAIUax7EMFtu9ErxcXVpjOZcogyegR77I1IlZWwHzR"
+      )
+    );
+  }
 
-  const EPMXPrice =
-    (
-      await sdk.api.abi.call({
-        abi: abi.getChainlinkLatestRoundData,
-        target: lensAddress,
-        chain: chain.toLowerCase(),
-        params: [[EPMXPriceFeed]],
-      })
-    ).output[0].answer /
-    10 ** EPMXPriceFeedDecimals;
+  if (chain === 'Base') {
+    sdk.api.config.setProvider(
+      'base',
+      new ethers.providers.JsonRpcProvider(
+        'https://lb.drpc.org/ogrpc?network=base&dkey=AhjAIUax7EMFtu9ErxcXVpjOZcogyegR77I1IlZWwHzR'
+      )
+    );
+  }
+  let bucketsArr = [];
+  let offset = 0;
+  const limit = 3;
 
+  while (true) {
+    try {
+      const result = (
+        await sdk.api.abi.call({
+          abi: abi.getAllBucketsFactory,
+          target: lensAddress,
+          chain: chain.toLowerCase(),
+          params: [
+            bucketsFactory,
+            DEAD_ADDRESS,
+            positionManager,
+            false,
+            offset,
+            limit,
+          ],
+        })
+      ).output;
+
+      if (result[0].length !== 0) {
+        bucketsArr = bucketsArr.concat(result[0]);
+      }
+
+      if (result[1] === '0') {
+        break;
+      }
+
+      offset += limit;
+    } catch (error) {
+      console.error(error);
+      break;
+    }
+  }
+  
   return await Promise.all(
-    buckets
-      .filter(({ miningParams }) => {
+    bucketsArr
+      .filter((bucket) => {
+        const miningParams = bucket.miningParams;
         const isMiningFailed =
-          !miningParams.isBucketLaunched &&
-          miningParams.deadlineTimestamp * 1000 <= Date.now();
-
+          !miningParams?.isBucketLaunched &&
+          miningParams?.deadlineTimestamp * 1000 <= Date.now();
         return !isMiningFailed;
       })
-      .map((b) => formatPool(b, config, EPMXPrice))
+      .map((b) => formatPool(b, config))
   );
 };
 
-const getApy = async (conf) => {
-  return (await Promise.all(conf.map((c) => getPools(c)))).flat();
-};
-
-const getApyCombined = async (config1, config2) => {
-  try {
-    const [apy1, apy2] = await Promise.all([getApy(config1), getApy(config2)]);
-
-    return [...apy1, ...apy2];
-  } catch (error) {
-    console.error('Error fetching APY:', error);
-    return [];
-  }
+const getApy = async () => {
+  const pools = (await Promise.all(config.map((c) => getPools(c)))).flat();
+  return pools.filter((i) => utils.keepFinite(i));
 };
 
 module.exports = {
   timetravel: false,
-  apy: async () => {
-    const combinedApy = await getApyCombined(config, configV2);
-    return combinedApy;
-  },
+  apy: getApy,
 };
